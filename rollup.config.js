@@ -8,6 +8,25 @@ import terser from '@rollup/plugin-terser';
 import postcssUrl from 'postcss-url';
 
 export default async () => {
+  const sharedPlugins = [
+    resolve({
+      extensions: ['.js', '.css']
+    }),
+    commonjs(),
+    postcss({
+      inject: true,
+      extract: false,
+      plugins: [
+        postcssImport(),
+        postcssUrl({
+          url: 'inline',
+          maxSize: 0
+        })
+      ],
+      include: ['**/*.css']
+    }),
+  ];
+
   return [
     {
       context: 'window',
@@ -18,22 +37,7 @@ export default async () => {
         name: 'JSNotebook',
       },
       plugins: [
-        resolve({
-          extensions: ['.js', '.css']
-        }),
-        commonjs(), // ✅ moved here
-        postcss({
-          inject: true,
-          extract: false,
-          plugins: [
-            postcssImport(),
-            postcssUrl({
-              url: 'inline',
-              maxSize: 0
-            })
-          ],
-          include: ['**/*.css']
-        }),
+        ...sharedPlugins,
         terser(),
         copy({
           targets: [{ src: 'src/style.css', dest: 'dist' }]
@@ -46,18 +50,7 @@ export default async () => {
         file: 'dist/js-notebook.esm.js',
         format: 'es',
       },
-      plugins: [
-        resolve({
-          extensions: ['.js', '.css']
-        }),
-        commonjs(), // ✅ also add it here
-        postcss({
-          inject: true,
-          extract: false,
-          plugins: [postcssImport()],
-          include: ['**/*.css']
-        })
-      ]
+      plugins: sharedPlugins
     }
   ];
 };
