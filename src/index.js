@@ -39,45 +39,45 @@ self.onmessage = function (msg) {
   let context = JSON.parse(msg.data.context);
   let code = msg.data.code;
 
-  let verbose = {
-    innerHTMLInternal: "",
-    innerHTMLListener: function(val) {
-      self_.postMessage({
-        type: 'update',
-        msg: {
-          verbose_string: this.innerHTML,
-          context: JSON.stringify({...context, ...self_})
-        }
-      });
-    },
-    set innerHTML(val) {
-      this.innerHTMLInternal = val;
-      this.innerHTMLListener(val);
-    },
-    get innerHTML() {
-      return this.innerHTMLInternal;
-    }
-  };
-  
-  function print() {
-    let args = [...arguments];
-    verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
-  }
-
   try {
+    
+
+    let verbose = {
+      innerHTMLInternal: "",
+      innerHTMLListener: function(val) {
+        self_.postMessage({
+          type: 'update',
+          msg: {
+            verbose_string: this.innerHTML,
+            context: JSON.stringify({...context, ...self_})
+          }
+        });
+      },
+      set innerHTML(val) {
+        this.innerHTMLInternal = val;
+        this.innerHTMLListener(val);
+      },
+      get innerHTML() {
+        return this.innerHTMLInternal;
+      }
+    };
+    
+    function print() {
+      let args = [...arguments];
+      verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
+    }
+
     let result;
     
     with (context) {
       result = eval(code);
     }
-  
-    new_context = {...context, ...self};
 
     self_.postMessage({
       type: 'complete',
       msg: {
         res: result,
-        context: JSON.stringify(new_context)  // Return the updated context back
+        context: JSON.stringify({...context, ...self_})  // Return the updated context back
       }
     });
   } catch (e) {
@@ -181,38 +181,128 @@ class JSNotebook {
 
     this.file;
 
-    document.onkeydown = function(e) {
-      if (event.code == "Enter" && event.shiftKey) {
-        if (t.selected_cell) {
+
+
+
+    this.cursor_line;
+
+    document.onclick = function(e) {
+      const isInEditor = document.activeElement.closest('.CodeMirror');
+
+        if (isInEditor) {
+
+          const cm = isInEditor.CodeMirror;
+          const cursor = cm.getCursor();
+          t.cursor_line = cursor.line;
+
+        }
+    }
+
+
+
+    document.onkeydown = (function () {
+      let lastKey = null;
+      let lastTime = 0;
+      const DOUBLE_PRESS_INTERVAL = 400;
+
+      return function (e) {
+
+        const isInEditor = document.activeElement.closest('.CodeMirror');
+        const key = e.code;
+        const now = Date.now();
+
+        // Shift+Enter always runs the selected cell
+        if (key === "Enter" && e.shiftKey && t.selected_cell) {
           e.preventDefault();
           t.offer_selected();
           return false;
         }
-      }
-      else if (event.code == "KeyS" && (event.metaKey || event.ctrlKey)) {
-        e.preventDefault();
-        t.save();
-        return false;
-      }
 
-      else if (event.code == "KeyA" && (event.metaKey || event.ctrlKey)) {
-        e.preventDefault();
-        t.insert_blank_above_selected();
-        return false;
-      }
-      else if (event.code == "KeyB" && (event.metaKey || event.ctrlKey)) {
-        e.preventDefault();
-        t.insert_blank_below_selected();
-        return false;
-      }
-      else if (event.code == "KeyD" && (event.metaKey || event.ctrlKey)) {
-        e.preventDefault();
-        t.delete_selected();
-        return false;
-      }
+        // Ctrl+S or Cmd+S
+        if (key === "KeyS" && (e.metaKey || e.ctrlKey)) {
+          e.preventDefault();
+          t.save();
+          return false;
+        }
 
-    }
-    
+        // Enter → focus CodeMirror in selected cell
+        if (key === "Enter" && !e.shiftKey && t.selected_cell && !isInEditor) {
+          e.preventDefault();
+          t.codeMirrors[t.selected_cell].focus();
+          return false;
+        }
+
+        // Escape → deselect current cell and blur CodeMirror
+        if (key === "Escape" && t.selected_cell) {
+          e.preventDefault();
+          // t.DOM_elements[t.selected_cell].cell.classList.remove("selected");
+          t.codeMirrors[t.selected_cell].getInputField().blur(); // <- this removes cursor from CodeMirror
+          // t.selected_cell = null;
+          return false;
+        }
+
+        // Inside CodeMirror editor
+        if (isInEditor) {
+          const cm = document.activeElement.closest('.CodeMirror').CodeMirror;
+          const cursor = cm.getCursor();
+          const lineCount = cm.lineCount();
+
+          // console.log("Cursor at:", cursor);
+
+
+          // Move up to previous cell only if you're at the first line
+          if (key === "ArrowUp" && cursor.line == 0 && t.selected_cell > 1 && t.cursor_line == 0) {
+            e.preventDefault();
+            t.DOM_elements[t.selected_cell - 1].cell.click();
+            t.codeMirrors[t.selected_cell].focus();
+            t.codeMirrors[t.selected_cell].setCursor(t.codeMirrors[t.selected_cell].lineCount(), 0);
+            t.cursor_line = t.codeMirrors[t.selected_cell].lineCount() - 1;
+            return false;
+          }
+
+          // Move down to next cell only if you're at the last line
+          if (key === "ArrowDown" && cursor.line == lineCount - 1 && t.selected_cell < t.get_num_cells() && (t.cursor_line == lineCount - 1)) {
+            e.preventDefault();
+            t.DOM_elements[t.selected_cell + 1].cell.click();
+            t.codeMirrors[t.selected_cell].focus();
+            t.codeMirrors[t.selected_cell].setCursor(0, 0);
+            t.cursor_line = 0;
+            return false;
+          }
+
+          t.cursor_line = cursor.line;
+
+          return; // let CodeMirror handle all other input
+        }
+
+        // Outside editor — handle double-press shortcuts for A, B, D
+        const isDoublePress = key === lastKey && (now - lastTime < DOUBLE_PRESS_INTERVAL);
+        lastKey = key;
+        lastTime = now;
+
+        if (key === "KeyA" && isDoublePress) {
+          e.preventDefault();
+          t.insert_blank_above_selected();
+          return false;
+        }
+
+        if (key === "KeyB" && isDoublePress) {
+          e.preventDefault();
+          t.insert_blank_below_selected();
+          return false;
+        }
+
+        if (key === "KeyD" && isDoublePress) {
+          e.preventDefault();
+          t.delete_selected();
+          return false;
+        }
+      };
+    })();
+
+        
+
+
   }
 
   offer(id) {
