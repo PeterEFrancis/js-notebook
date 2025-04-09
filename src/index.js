@@ -32,15 +32,21 @@ function remove(arr, index) {
 
 
 const workerCode = `
-function eval_code(info) {
+self.onmessage = function (msg) {
+
   const self_ = self;
+
+  let context = JSON.parse(msg.data.context);
+  let code = msg.data.code;
+
   let verbose = {
     innerHTMLInternal: "",
     innerHTMLListener: function(val) {
       self_.postMessage({
         type: 'update',
         msg: {
-          verbose_string: this.innerHTML
+          verbose_string: this.innerHTML,
+          context: JSON.stringify({...context, ...self_})
         }
       });
     },
@@ -52,28 +58,35 @@ function eval_code(info) {
       return this.innerHTMLInternal;
     }
   };
+  
   function print() {
     let args = [...arguments];
     verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
   }
-  return eval(info.str);
-  // self.postMessage({
-  //   type: 'complete'
-  // });
-}
 
-self.onmessage = function (msg) {
   try {
-    const data = msg.data;
-    self.postMessage({
+    let result;
+    
+    with (context) {
+      result = eval(code);
+    }
+  
+    new_context = {...context, ...self};
+
+    self_.postMessage({
       type: 'complete',
-      res: eval_code(data.info)
+      msg: {
+        res: result,
+        context: JSON.stringify(new_context)  // Return the updated context back
+      }
     });
   } catch (e) {
-    self.postMessage({
+    self_.postMessage({
       type: 'error',
-      msg: e.message,
-      error: e
+      msg: {
+        error: e,
+        context: JSON.stringify({...context, ...self_})
+      }
     });
   }
 }
@@ -85,12 +98,13 @@ const worker = new Worker(workerBlobURL);
 
 
 class Computer {
-  constructor() {
+  constructor(context) {
     this.worker = new Worker(workerBlobURL);
+    this.context = context || {};
   }
 
   start(data) {
-    // data is JSON with info, timeout, an ontimeout function, onupdate, and an oncomplete function
+    // data is JSON with code, timeout, an ontimeout function, onupdate, and an oncomplete function
     const timeout = data.timeout;
     // kill after timeout
     const w = this.worker;
@@ -105,15 +119,18 @@ class Computer {
     }, data.timeout);
 
     // responses
-    this.worker.onmessage = function(msg) {
-      data['on' + msg.data.type](msg);
-      if (msg.data.type == 'complete') {
+    const t = this;
+    this.worker.onmessage = function(response) {
+      data['on' + response.data.type](response.data.msg);
+      t.context = JSON.parse(response.data.msg.context);
+      if (response.data.type == 'complete') {
         clearTimeout(id);
       }
     }
     // start computation
     this.worker.postMessage({
-      info: data.info
+      code: data.code,
+      context: JSON.stringify(t.context)
     });
   }
 
@@ -127,8 +144,8 @@ class Computer {
 
 
 class JSNotebook {
-  constructor(container) {
-
+  constructor(container, global_context) {
+    this.global_context = global_context || {};
     this.container = container;
     this.build_html();
     
@@ -147,7 +164,7 @@ class JSNotebook {
     this.calculation_queue = [];
     this.calculating = false;
     this.curr = null;
-    this.computer = null;
+    this.computer = new Computer(this.global_context);
     this.execution_num = 0;
 
     this.insert_blank_cell(0);
@@ -156,7 +173,7 @@ class JSNotebook {
     
     setInterval(function() {t.save()}, 10000);
 
-    let saved = localStorage.getItem('contents');
+    let saved = localStorage.getItem(window.location.href + '--contents');
     if (saved) {
       this.contents = JSON.parse(saved)
       this.build_from_contents();
@@ -228,7 +245,7 @@ class JSNotebook {
   next() {
     if (this.calculation_queue.length == 0) {
       this.calc_state(false);
-      this.computer = null;
+      // this.computer = null;
       this.curr = null;
       return false;
     }
@@ -238,29 +255,27 @@ class JSNotebook {
     this.curr = id;
     if (this.contents[id]) {
       this.execution_num++;
-     this. contents[id].tag = this.execution_num;
+      this.contents[id].tag = this.execution_num;
       this.contents[id].output_content = "";
       this.write_cell_output(id);
-      this.computer = new Computer();
+      // this.computer = new Computer();
       const t = this;
       this.computer.start({
-        info: {
-          str:execute_info.str
-        },
-        oncomplete: function(response) {
+        code: execute_info.str,
+        oncomplete: function(msg) {
           t.contents[id].state = 'normal';
           t.write_cell_output(id);
           t.next();
         },
-        onupdate: function(response) {
+        onupdate: function(msg) {
           t.contents[id].state = 'calc';
-          t.contents[id].output_content = response.data.msg.verbose_string;
+          t.contents[id].output_content = msg.verbose_string;
           t.write_cell_output(id);
         },
-        onerror: function (response) {
+        onerror: function (msg) {
           t.contents[id].state = 'error';
-          t.contents[id].output_content += response.data.error.stack;
-          console.log(response.data.error);
+          t.contents[id].output_content += msg.error.stack;
+          console.log(msg.error);
           t.write_cell_output(id);
           t.error();
         }
@@ -269,12 +284,14 @@ class JSNotebook {
   }
   
   stop() {
-    this.computer.stop();
-    this.contents[this.curr].state = 'stop';
-    this.write_cell_output(this.curr);
-    this.calc_state(false);
-    this.empty();
-    console.log('# calculation stopped');
+    if (this.calculating) {
+      this.computer.stop();
+      this.contents[this.curr].state = 'stop';
+      this.write_cell_output(this.curr);
+      this.calc_state(false);
+      this.empty();
+      console.log('# calculation stopped');
+    }
   }
   
   error() {
@@ -284,10 +301,21 @@ class JSNotebook {
 
   empty() {
     for (let execute_info of this.calculation_queue) {
-      cthis.ontents[execute_info.id].state = 'clear';
+      this.ontents[execute_info.id].state = 'clear';
       this.write_cell_output(execute_info.id);
     }
     this.calculating_queue = [];
+  }
+
+  restart_copmuter() {
+    this.stop();
+    this.computer = new Computer(this.global_context);
+    this.empty();
+    for (let id = 1; id < this.get_num_cells(); id++) {
+      this.contents[id].tag = " ";
+      this.contents[id].output_content = "";
+    }
+    this.build_from_contents()
   }
 
 
@@ -351,17 +379,22 @@ class JSNotebook {
     this.runBtn = document.createElement('button');
     this.runBtn.id = 'run';
     this.runBtn.className = 'btn';
-    this.runBtn.onclick = this.offer_selected;
+    this.runBtn.onclick = function() {t.offer_selected()};
     this.runBtn.innerHTML = `<i class="bi bi-play-fill"></i>`;
     btnGroup.appendChild(this.runBtn);
 
     this.stopBtn = document.createElement('button');
     this.stopBtn.id = 'stop';
     this.stopBtn.className = 'btn';
-    this.stopBtn.onclick = function () {this.stop();};
+    this.stopBtn.onclick = function () {t.stop();};
     this.stopBtn.innerHTML = `<i class="bi bi-stop-fill"></i>`;
     btnGroup.appendChild(this.stopBtn);
 
+    let restartBtn = document.createElement('button');
+    restartBtn.className = 'btn';
+    restartBtn.onclick = function () {t.restart_copmuter()};
+    restartBtn.innerHTML = `<i class="bi bi-arrow-clockwise"></i>`;
+    btnGroup.appendChild(restartBtn);
 
     const openBtn = document.createElement('button');
     openBtn.className = 'btn';
@@ -485,7 +518,6 @@ class JSNotebook {
     this.open_modal.appendChild(modalDialog);
 
     this.container.appendChild(this.open_modal);
-
   }
 
   get_num_cells() {
@@ -512,12 +544,6 @@ class JSNotebook {
     this.deselect();
     this.DOM_elements[cell_id].cell.classList.add('selected');
     this.selected_cell = cell_id;
-  }
-
-  offer_selected() {
-    if (this.selected_cell) {
-      this.offer(selected_cell);
-    }
   }
 
   generate_cell_DOM(cell_id) {
@@ -800,7 +826,7 @@ class JSNotebook {
   }
 
   save() {
-    localStorage.setItem('contents', this.get_string_contents());
+    localStorage.setItem(window.location.href + '--contents', this.get_string_contents());
   }
 
   offer_selected() {
@@ -811,7 +837,6 @@ class JSNotebook {
 
   calc_state(bool) {
     this.calculating = bool;
-      this.stopBtn.disabled = !bool;
   }
 
 
