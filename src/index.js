@@ -307,7 +307,7 @@ class JSNotebook {
     this.calculating_queue = [];
   }
 
-  restart_copmuter() {
+  restart_computer() {
     this.stop();
     this.computer = new Computer(this.global_context);
     this.empty();
@@ -392,7 +392,7 @@ class JSNotebook {
 
     let restartBtn = document.createElement('button');
     restartBtn.className = 'btn';
-    restartBtn.onclick = function () {t.restart_copmuter()};
+    restartBtn.onclick = function () {t.restart_computer()};
     restartBtn.innerHTML = `<i class="bi bi-arrow-clockwise"></i>`;
     btnGroup.appendChild(restartBtn);
 
