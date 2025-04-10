@@ -1,5 +1,5 @@
 import 'bootstrap/dist/css/bootstrap.min.css';
-import 'bootstrap/dist/js/bootstrap.min.js';
+import 'bootstrap/dist/js/bootstrap.bundle.min.js';
 import 'bootstrap-icons/font/bootstrap-icons.css';
 
 import 'codemirror/lib/codemirror.css';
@@ -8,7 +8,7 @@ import 'codemirror/mode/javascript/javascript';
 import * as CodeMirror from 'codemirror';
 
 
-
+import { Popover } from 'bootstrap';
 import { saveAs } from 'file-saver';
 
 import './style.css';
@@ -423,7 +423,7 @@ class JSNotebook {
     this.container.appendChild(row);
 
     const col = document.createElement('div');
-    col.className = 'col-md-12';
+    col.className = 'col-sm-12';
     row.appendChild(col);
 
     const btnGroup = document.createElement('div');
@@ -470,14 +470,14 @@ class JSNotebook {
     this.runBtn.id = 'run';
     this.runBtn.className = 'btn';
     this.runBtn.onclick = function() {t.offer_selected()};
-    this.runBtn.innerHTML = `<i class="bi bi-play-fill"></i>`;
+    this.runBtn.innerHTML = `<i class="bi bi-play"></i>`;
     btnGroup.appendChild(this.runBtn);
 
     this.stopBtn = document.createElement('button');
     this.stopBtn.id = 'stop';
     this.stopBtn.className = 'btn';
     this.stopBtn.onclick = function () {t.stop();};
-    this.stopBtn.innerHTML = `<i class="bi bi-stop-fill"></i>`;
+    this.stopBtn.innerHTML = `<i class="bi bi-stop"></i>`;
     btnGroup.appendChild(this.stopBtn);
 
     let restartBtn = document.createElement('button');
@@ -511,11 +511,31 @@ class JSNotebook {
     // saveBtn.innerHTML = `<i class="bi bi-save"></i>`;
     // btnGroup.appendChild(saveBtn);
 
+
+    const infoBtn = document.createElement('button');
+    infoBtn.className = 'btn float-end';
+    infoBtn.innerHTML = `<i class="bi bi-info-circle"></i>`;
+    infoBtn.setAttribute('data-bs-toggle', 'popover');
+    // infoBtn.setAttribute('data-bs-content', );
+
+    btnGroup.appendChild(infoBtn);
+    new Popover(infoBtn, {
+      placement: 'left',
+      html: true,
+      // fallbackPlacements: [], // prevent flipping
+      content: 'Variables declared (with <code>let</code>, <code>function</code>, etc.) will not be available between cells. To make notebook-wide variables, don\'t use declaration keywords.<br><br>Use <code>print()</code> to output to the notebook underneath each cell.'
+    });
+
+
+
+
+    let add_bar_main_row = document.createElement('row'); add_bar_main_row.classList.add('row');
     let add_bar = document.createElement('div'); add_bar.classList.add('container-fluid', 'add-btn-bar');
     let add_bar_row = document.createElement('div'); add_bar_row.classList.add('row');
     let add_bar_col = document.createElement('div'); add_bar_col.classList.add('col-xl-12');
     let add_btn_bar = document.createElement('button'); 
-    this.container.appendChild(add_bar);
+    this.container.appendChild(add_bar_main_row);
+    add_bar_main_row.appendChild(add_bar);
     add_bar.appendChild(add_bar_row);
     add_bar_row.appendChild(add_bar_col);
     add_bar_col.appendChild(add_btn_bar);
@@ -525,6 +545,7 @@ class JSNotebook {
 
     // === Cell List Container ===
     this.cell_list = document.createElement('div');
+    this.cell_list.className = 'row';
     this.cell_list.id = 'cell-list';
     this.container.appendChild(this.cell_list);
 
