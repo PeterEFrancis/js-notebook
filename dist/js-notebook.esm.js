@@ -17242,68 +17242,60 @@ function remove(arr, index) {
 // worker and endpoints
 
 
-
-
 const workerCode = `
-self.onmessage = function (msg) {
 
-  const self_ = self;
+const self_ = self;
 
-  let context = JSON.parse(msg.data.context);
-  let code = msg.data.code;
-
-  try {
-    
-
-    let verbose = {
-      innerHTMLInternal: "",
-      innerHTMLListener: function(val) {
-        self_.postMessage({
-          type: 'update',
-          msg: {
-            verbose_string: this.innerHTML,
-            context: JSON.stringify({...context, ...self_})
-          }
-        });
-      },
-      set innerHTML(val) {
-        this.innerHTMLInternal = val;
-        this.innerHTMLListener(val);
-      },
-      get innerHTML() {
-        return this.innerHTMLInternal;
-      }
-    };
-    
-    function print() {
-      let args = [...arguments];
-      verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
-    }
-
-    let result;
-    
-    with (context) {
-      result = eval(code);
-    }
-
-    self_.postMessage({
-      type: 'complete',
+var verbose = {
+  innerHTMLInternal: "",
+  innerHTMLListener: function(val) {
+    self.postMessage({
+      type: 'update',
       msg: {
-        res: result,
-        context: JSON.stringify({...context, ...self_})  // Return the updated context back
+        verbose_string: this.innerHTML
       }
     });
+  },
+  set innerHTML(val) {
+    this.innerHTMLInternal = val;
+    this.innerHTMLListener(val);
+  },
+  get innerHTML() {
+    return this.innerHTMLInternal;
+  }
+};
+
+function print() {
+  let args = [...arguments];
+  verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
+}
+
+
+self.onmessage = function (msg) {
+
+  try {
+
+    verbose.innerHTML = '';
+
+    eval(msg.data.code);
+    
+    self_.postMessage({
+      type: 'complete'
+    });
+
   } catch (e) {
     self_.postMessage({
       type: 'error',
       msg: {
-        error: e,
-        context: JSON.stringify({...context, ...self_})
+        error: e
       }
     });
   }
 }
 `;
+
+
+
 
 const blob = new Blob([workerCode], { type: 'application/javascript' });
 const workerBlobURL = URL.createObjectURL(blob);
@@ -17313,7 +17305,6 @@ new Worker(workerBlobURL);
 class Computer {
   constructor(context) {
     this.worker = new Worker(workerBlobURL);
-    this.context = context || {};
   }
 
   start(data) {
@@ -17330,20 +17321,15 @@ class Computer {
         });
       }
     }, data.timeout);
-
-    // responses
-    const t = this;
     this.worker.onmessage = function(response) {
       data['on' + response.data.type](response.data.msg);
-      t.context = JSON.parse(response.data.msg.context);
       if (response.data.type == 'complete') {
         clearTimeout(id);
       }
     };
     // start computation
     this.worker.postMessage({
-      code: data.code,
-      context: JSON.stringify(t.context)
+      code: data.code
     });
   }
 
@@ -17357,8 +17343,7 @@ class Computer {
 
 
 class JSNotebook {
-  constructor(container, global_context) {
-    this.global_context = global_context || {};
+  constructor(container) {
     this.container = container;
     this.build_html();
     
@@ -17377,7 +17362,7 @@ class JSNotebook {
     this.calculation_queue = [];
     this.calculating = false;
     this.curr = null;
-    this.computer = new Computer(this.global_context);
+    this.computer = new Computer();
     this.execution_num = 0;
 
     this.insert_blank_cell(0);
@@ -17393,7 +17378,6 @@ class JSNotebook {
     }
 
     this.file;
-
 
 
 
@@ -17496,18 +17480,21 @@ class JSNotebook {
         if (key === "KeyA" && isDoublePress) {
           e.preventDefault();
           t.insert_blank_above_selected();
+          lastKey = null;
           return false;
         }
 
         if (key === "KeyB" && isDoublePress) {
           e.preventDefault();
           t.insert_blank_below_selected();
+          lastKey = null;
           return false;
         }
 
         if (key === "KeyD" && isDoublePress) {
           e.preventDefault();
           t.delete_selected();
+          lastKey = null;
           return false;
         }
       };
@@ -17535,11 +17522,11 @@ class JSNotebook {
     this.contents[id].output_content = '';
     this.write_cell_output(id);
     if (id == this.contents.length - 1) { // if last cell
-     this. insert_blank_cell(id + 1);
+     this.insert_blank_cell(id + 1);
     }
     this.DOM_elements[id + 1].cell.click();
     this.codeMirrors[id + 1].focus();
-
+    this.cursor_line = 0;
     if (!this.calculating) {
       this.next();
     }
@@ -17548,7 +17535,6 @@ class JSNotebook {
   next() {
     if (this.calculation_queue.length == 0) {
       this.calc_state(false);
-      // this.computer = null;
       this.curr = null;
       return false;
     }
@@ -17559,9 +17545,9 @@ class JSNotebook {
     if (this.contents[id]) {
       this.execution_num++;
       this.contents[id].tag = this.execution_num;
+      this.contents[id].state = 'calc';
       this.contents[id].output_content = "";
       this.write_cell_output(id);
-      // this.computer = new Computer();
       const t = this;
       this.computer.start({
         code: execute_info.str,
@@ -17569,11 +17555,13 @@ class JSNotebook {
           t.contents[id].state = 'normal';
           t.write_cell_output(id);
           t.next();
+          t.save();
         },
         onupdate: function(msg) {
           t.contents[id].state = 'calc';
           t.contents[id].output_content = msg.verbose_string;
           t.write_cell_output(id);
+          t.save();
         },
         onerror: function (msg) {
           t.contents[id].state = 'error';
@@ -17581,6 +17569,7 @@ class JSNotebook {
           console.log(msg.error);
           t.write_cell_output(id);
           t.error();
+          t.save();
         }
       });
     }
@@ -17604,7 +17593,7 @@ class JSNotebook {
 
   empty() {
     for (let execute_info of this.calculation_queue) {
-      this.ontents[execute_info.id].state = 'clear';
+      this.contents[execute_info.id].state = 'clear';
       this.write_cell_output(execute_info.id);
     }
     this.calculating_queue = [];
@@ -17612,7 +17601,7 @@ class JSNotebook {
 
   restart_computer() {
     this.stop();
-    this.computer = new Computer(this.global_context);
+    this.computer = new Computer();
     this.empty();
     for (let id = 1; id < this.get_num_cells(); id++) {
       this.contents[id].tag = " ";
@@ -17659,7 +17648,7 @@ class JSNotebook {
     // Insert below button
     const insertBelowBtn = document.createElement('button');
     insertBelowBtn.className = 'btn';
-    insertBelowBtn.title = 'ctl+B';
+    insertBelowBtn.title = 'B,B';
     insertBelowBtn.onclick = function() {t.insert_blank_below_selected();};
     insertBelowBtn.setAttribute('data-container', 'body');
     insertBelowBtn.setAttribute('data-toggle', 'tooltip');
@@ -17672,7 +17661,7 @@ class JSNotebook {
     const deleteBtn = document.createElement('button');
     deleteBtn.id = 'delete';
     deleteBtn.className = 'btn';
-    deleteBtn.title = 'ctl+D';
+    deleteBtn.title = 'D,D';
     deleteBtn.onclick = function() {t.delete_selected();};
     deleteBtn.setAttribute('data-toggle', 'tooltip');
     deleteBtn.setAttribute('data-placement', 'top');
@@ -17682,6 +17671,9 @@ class JSNotebook {
     this.runBtn = document.createElement('button');
     this.runBtn.id = 'run';
     this.runBtn.className = 'btn';
+    this.runBtn.title = 'shift+return';
+    this.runBtn.setAttribute('data-toggle', 'tooltip');
+    this.runBtn.setAttribute('data-placement', 'top');
     this.runBtn.onclick = function() {t.offer_selected();};
     this.runBtn.innerHTML = `<i class="bi bi-play"></i>`;
     btnGroup.appendChild(this.runBtn);
@@ -18069,23 +18061,26 @@ class JSNotebook {
   }
   
   write_cell_output(cell_id) {
+    const t = this;
     this.DOM_elements[cell_id].verbose.style.color = this.contents[cell_id].state == 'error' ? 'red' : 'black';
     this.DOM_elements[cell_id].verbose.innerHTML = this.contents[cell_id].output_content.replaceAll('\n','<br>').replace('\t','&emsp;').replaceAll(' ','&nbsp;');
     this.DOM_elements[cell_id].code_tag.innerHTML = '[' + (this.contents[cell_id].state == 'queued' ? '*' : this.contents[cell_id].state == 'clear' ? ' ' : this.contents[cell_id].tag) + ']:';
+
     this.DOM_elements[cell_id].output_tag.innerHTML = '[' + {
-      'normal': this.contents[cell_id].tag,
+      'normal': t.contents[cell_id].tag,
       'error':'?',
       'calc':'*',
       'stop':'#',
       'queued':'',
       'clear':''
-    }[this.contents[cell_id].state] + ']:';
-    if (['queued', 'clear'].includes(this.contents[cell_id].state) || this.contents[cell_id].output_content == '') {
+    }[t.contents[cell_id].state] + ']:';
+
+    if (['queued', 'clear'].includes(this.contents[cell_id].state)) { //} || this.contents[cell_id].output_content == '') {
       this.DOM_elements[cell_id].output_tag.classList.add('hidden');
     } else {
       this.DOM_elements[cell_id].output_tag.classList.remove('hidden');
     }
-    // save();
+    // this.save();
   }
 
 

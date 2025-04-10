@@ -1,46 +1,61 @@
-function eval_code(info) {
+const workerCode = `
+self.onmessage = function (msg) {
+
   const self_ = self;
-  let context = info.context || {};
-  let verbose = {
-    innerHTMLInternal: "",
-    innerHTMLListener: function(val) {
+
+  let context = JSON.parse(msg.data.context);
+  let code = msg.data.code;
+
+  try {
+    
+
+    let verbose = {
+      innerHTMLInternal: "",
+      innerHTMLListener: function(val) {
+        self_.postMessage({
+          type: 'update',
+          msg: {
+            verbose_string: this.innerHTML,
+            context: JSON.stringify({...context, ...self_})
+          }
+        });
+      },
+      set innerHTML(val) {
+        this.innerHTMLInternal = val;
+        this.innerHTMLListener(val);
+      },
+      get innerHTML() {
+        return this.innerHTMLInternal;
+      }
+    };
+    
+    function print() {
+      let args = [...arguments];
+      verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
+    }
+
+    let result;
+    
+    with (context) {
+      result = eval(code);
+    
       self_.postMessage({
-        type: 'update',
+        type: 'complete',
         msg: {
-          verbose_string: this.innerHTML,
-          context: { ...context, ...self_ }
+          res: result,
+          context: JSON.stringify({...context, ...self_})  // Return the updated context back
         }
       });
-    },
-    set innerHTML(val) {
-      this.innerHTMLInternal = val;
-      this.innerHTMLListener(val);
-    },
-    get innerHTML() {
-      return this.innerHTMLInternal;
-    }
-  };
-  function print() {
-    let args = [...arguments];
-    verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
-  }
-  return [eval(info.str), JSON.stringify({ ...context, ...self_ })];
-}
 
-self.onmessage = function (msg) {
-  try {
-    const data = msg.data;
-    let ret = eval_code(data.info);
-    self.postMessage({
-      type: 'complete',
-      res: ret[0],
-      context: ret[1]
-    });
+    }
   } catch (e) {
-    self.postMessage({
+    self_.postMessage({
       type: 'error',
-      msg: e.message,
-      error: e
+      msg: {
+        error: e,
+        context: JSON.stringify({...context, ...self_})
+      }
     });
   }
 }
+`
