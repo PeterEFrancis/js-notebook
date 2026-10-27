@@ -2,15 +2,21 @@
   "name": "js-notebook",
   "version": "0.1.0",
   "description": "Lightweight JavaScript notebook",
-  "main": "dist/js-notebook.min.js",
-  "module": "src/index.js",
+  "main": "dist/js-notebook.cjs",
+  "module": "dist/js-notebook.esm.js",
   "type": "module",
   "exports": {
-    "import": "./src/index.js",
-    "require": "./dist/js-notebook.min.js"
+    ".": {
+      "import": "./dist/js-notebook.esm.js",
+      "require": "./dist/js-notebook.cjs"
+    },
+    "./style.css": "./dist/style.css"
   },
+  "engines": {"node": ">=20"},
+  "files": ["dist", "LICENSE", "readme.md"],
   "scripts": {
-    "build": "rollup -c"
+    "build": "rollup -c",
+    "test": "node --test"
   },
   "keywords": [
     "notebook",
@@ -22,8 +28,7 @@
   "devDependencies": {
     "@rollup/plugin-commonjs": "^28.0.3",
     "@rollup/plugin-node-resolve": "^16.0.1",
-    "@rollup/plugin-terser": "^0.4.4",
-    "commonjs": "0.0.1",
+    "@rollup/plugin-terser": "^1.0.2",
     "postcss": "^8.5.3",
     "postcss-import": "^16.1.0",
     "postcss-url": "^10.1.3",

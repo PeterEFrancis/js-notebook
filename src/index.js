@@ -1,5 +1,4 @@
 import 'bootstrap/dist/css/bootstrap.min.css';
-import 'bootstrap/dist/js/bootstrap.bundle.min.js';
 import 'bootstrap-icons/font/bootstrap-icons.css';
 
 import 'codemirror/lib/codemirror.css';
@@ -23,6 +22,29 @@ function insert(arr, index, el) {
 function remove(arr, index) {
   return [...arr.slice(0, index), ...arr.slice(1 + index)];
 }
+
+function parseContents(serialized) {
+  const contents = JSON.parse(serialized);
+  if (!Array.isArray(contents) || contents.length === 0 || contents[0] !== null) {
+    throw new Error('Invalid notebook: expected an array beginning with null.');
+  }
+  return [null, ...contents.slice(1).map(cell => {
+    if (!cell || typeof cell.code_content !== 'string' || typeof cell.output_content !== 'string' ||
+        !['normal', 'error', 'clear', 'calc', 'queued', 'stop'].includes(cell.state) ||
+        !(cell.tag === ' ' || (Number.isSafeInteger(cell.tag) && cell.tag >= 0))) {
+      throw new Error('Invalid notebook cell.');
+    }
+    return {
+      code_content: cell.code_content,
+      output_content: cell.output_content,
+      tag: cell.tag,
+      state: ['calc', 'queued'].includes(cell.state) ? 'clear' : cell.state
+    };
+  })];
+}
+
+let activeNotebook;
+let nextNotebookId = 0;
 
 
 
@@ -54,7 +76,11 @@ var verbose = {
 
 function print() {
   let args = [...arguments];
-  verbose.innerHTML += args.map(x => typeof(x) == 'string' ? x : JSON.stringify(x)).join(' ') + '\\n';
+  verbose.innerHTML += args.map(x => {
+    if (typeof x === 'string') return x;
+    try { return JSON.stringify(x) ?? String(x); }
+    catch { return String(x); }
+  }).join(' ') + '\\n';
 }
 
 
@@ -74,7 +100,7 @@ self.onmessage = function (msg) {
     self_.postMessage({
       type: 'error',
       msg: {
-        error: e
+        error: e && e.stack ? e.stack : String(e)
       }
     });
   }
@@ -86,45 +112,60 @@ self.onmessage = function (msg) {
 
 const blob = new Blob([workerCode], { type: 'application/javascript' });
 const workerBlobURL = URL.createObjectURL(blob);
-const worker = new Worker(workerBlobURL);
 
 
 class Computer {
-  constructor(context) {
+  constructor() {
     this.worker = new Worker(workerBlobURL);
+    this.timer = null;
   }
 
   start(data) {
-    // data is JSON with code, timeout, an ontimeout function, onupdate, and an oncomplete function
-    const timeout = data.timeout;
-    // kill after timeout
     const w = this.worker;
-    const ontimeout = data.ontimeout || function (x) {console.log('timeout')};
-    const id = setTimeout(function() {
-      if (timeout) {
-        w.terminate();
-        ontimeout({
-          msg: ' calculation timed out after ' + timeout + 'ms.'
-        });
-      }
-    }, data.timeout);
-
-    // responses
-    const t = this;
-    this.worker.onmessage = function(response) {
-      data['on' + response.data.type](response.data.msg);
-      if (response.data.type == 'complete') {
-        clearTimeout(id);
-      }
+    clearTimeout(this.timer);
+    const finish = () => {
+      clearTimeout(this.timer);
+      this.timer = null;
+      w.onmessage = null;
+      w.onerror = null;
+      w.onmessageerror = null;
+    };
+    w.onmessage = response => {
+      if (this.worker !== w) return;
+      const {type, msg} = response.data;
+      if (type === 'complete' || type === 'error') finish();
+      const handler = data['on' + type];
+      if (typeof handler === 'function') handler(msg);
+    };
+    const fail = event => {
+      if (this.worker !== w) return;
+      if (event.preventDefault) event.preventDefault();
+      finish();
+      this.stop();
+      if (data.onerror) data.onerror({error: event.message || 'Worker execution failed.'});
+    };
+    w.onerror = fail;
+    w.onmessageerror = fail;
+    if (data.timeout > 0) {
+      this.timer = setTimeout(() => {
+        finish();
+        this.stop();
+        const handler = data.ontimeout || data.onerror;
+        if (handler) handler({error: 'Calculation timed out after ' + data.timeout + 'ms.'});
+      }, data.timeout);
     }
-    // start computation
-    this.worker.postMessage({
-      code: data.code
-    });
+    try { w.postMessage({code: data.code}); }
+    catch (error) { fail(error); }
   }
 
   stop() {
+    clearTimeout(this.timer);
+    this.timer = null;
+    this.worker.onmessage = null;
+    this.worker.onerror = null;
+    this.worker.onmessageerror = null;
     this.worker.terminate();
+    this.worker = new Worker(workerBlobURL);
   }
 
 }
@@ -135,6 +176,10 @@ class Computer {
 class JSNotebook {
   constructor(container) {
     this.container = container;
+    activeNotebook = this;
+    const activate = () => { activeNotebook = this; };
+    container.addEventListener('pointerdown', activate);
+    container.addEventListener('focusin', activate);
     this.build_html();
     
     this.runBtn;
@@ -156,16 +201,19 @@ class JSNotebook {
     this.execution_num = 0;
 
     this.insert_blank_cell(0);
+    this.select_cell(1);
     
     const t = this;
     
     setInterval(function() {t.save()}, 10000);
 
-    let saved = localStorage.getItem(window.location.href + '--contents');
-    if (saved) {
-      this.contents = JSON.parse(saved)
-      this.build_from_contents();
-    }
+    try {
+      const saved = localStorage.getItem(window.location.href + '--contents');
+      if (saved) {
+        this.contents = parseContents(saved);
+        this.build_from_contents();
+      }
+    } catch (error) { console.warn('Unable to restore notebook.', error); }
 
     this.file;
 
@@ -173,7 +221,7 @@ class JSNotebook {
 
     this.cursor_line;
 
-    document.onclick = function(e) {
+    container.addEventListener('click', function() {
       const isInEditor = document.activeElement.closest('.CodeMirror');
 
         if (isInEditor) {
@@ -183,18 +231,22 @@ class JSNotebook {
           t.cursor_line = cursor.line;
 
         }
-    }
+    });
 
 
 
-    document.onkeydown = (function () {
+    document.addEventListener('keydown', (function () {
       let lastKey = null;
       let lastTime = 0;
       const DOUBLE_PRESS_INTERVAL = 400;
 
       return function (e) {
+        if (activeNotebook !== t || e.defaultPrevented) return;
 
-        const isInEditor = document.activeElement.closest('.CodeMirror');
+        const focused = document.activeElement;
+        const isInEditor = t.container.contains(focused) && focused.closest('.CodeMirror');
+        if (!isInEditor && focused !== document.body &&
+            (!t.container.contains(focused) || focused.matches('input, textarea, select, [contenteditable]'))) return;
         const key = e.code;
         const now = Date.now();
 
@@ -211,6 +263,7 @@ class JSNotebook {
           t.save();
           return false;
         }
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
 
         // Enter → focus CodeMirror in selected cell
         if (key === "Enter" && !e.shiftKey && t.selected_cell && !isInEditor) {
@@ -288,7 +341,7 @@ class JSNotebook {
           return false;
         }
       };
-    })();
+    })());
 
         
 
@@ -297,15 +350,15 @@ class JSNotebook {
 
   offer(id) {
     id = Number(id);
-    if (this.curr == id) {
-      this.computer.stop();
-      this.calc_state(false);
-    }
+    const cell = this.contents[id];
+    if (!cell || !this.codeMirrors[id]) return false;
     if (this.codeMirrors[id].getValue().trim() == '') {
       return false;
     }
+    if (this.curr === cell) this.stop();
+    this.calculation_queue = this.calculation_queue.filter(entry => entry.cell !== cell);
     this.calculation_queue.push({
-      id:id,
+      cell,
       str:this.codeMirrors[id].getValue()
     });
     this.contents[id].state = 'queued';
@@ -328,10 +381,12 @@ class JSNotebook {
       this.curr = null;
       return false;
     }
+    const execute_info = this.calculation_queue.shift();
+    const cell = execute_info.cell;
+    const id = this.contents.indexOf(cell);
+    if (id < 1) return this.next();
     this.calc_state(true);
-    let execute_info = this.calculation_queue.shift();
-    const id = Number(execute_info.id);
-    this.curr = id;
+    this.curr = cell;
     if (this.contents[id]) {
       this.execution_num++;
       this.contents[id].tag = this.execution_num;
@@ -339,24 +394,30 @@ class JSNotebook {
       this.contents[id].output_content = "";
       this.write_cell_output(id);
       const t = this;
+      const currentId = () => t.curr === cell && t.calculating ? t.contents.indexOf(cell) : -1;
       this.computer.start({
         code: execute_info.str,
         oncomplete: function(msg) {
+          const id = currentId();
+          if (id < 1) return;
           t.contents[id].state = 'normal';
           t.write_cell_output(id);
           t.next();
           t.save();
         },
         onupdate: function(msg) {
+          const id = currentId();
+          if (id < 1) return;
           t.contents[id].state = 'calc';
           t.contents[id].output_content = msg.verbose_string;
           t.write_cell_output(id);
           t.save();
         },
         onerror: function (msg) {
+          const id = currentId();
+          if (id < 1) return;
           t.contents[id].state = 'error';
-          t.contents[id].output_content += msg.error.stack;
-          console.log(msg.error);
+          t.contents[id].output_content += String(msg.error?.stack ?? msg.error);
           t.write_cell_output(id);
           t.error();
           t.save();
@@ -368,34 +429,42 @@ class JSNotebook {
   stop() {
     if (this.calculating) {
       this.computer.stop();
-      this.contents[this.curr].state = 'stop';
-      this.write_cell_output(this.curr);
-      this.calc_state(false);
-      this.empty();
-      console.log('# calculation stopped');
+      const id = this.contents.indexOf(this.curr);
+      if (id > 0) {
+        this.contents[id].state = 'stop';
+        this.write_cell_output(id);
+      }
     }
+    this.calc_state(false);
+    this.curr = null;
+    this.empty();
   }
   
   error() {
     this.calc_state(false);
+    this.curr = null;
     this.empty();
   }
 
   empty() {
     for (let execute_info of this.calculation_queue) {
-      this.contents[execute_info.id].state = 'clear';
-      this.write_cell_output(execute_info.id);
+      const id = this.contents.indexOf(execute_info.cell);
+      if (id > 0) {
+        this.contents[id].state = 'clear';
+        this.write_cell_output(id);
+      }
     }
-    this.calculating_queue = [];
+    this.calculation_queue = [];
   }
 
   restart_computer() {
+    const wasCalculating = this.calculating;
     this.stop();
-    this.computer = new Computer();
-    this.empty();
-    for (let id = 1; id < this.get_num_cells(); id++) {
+    if (!wasCalculating) this.computer.stop();
+    for (let id = 1; id <= this.get_num_cells(); id++) {
       this.contents[id].tag = " ";
       this.contents[id].output_content = "";
+      this.contents[id].state = 'clear';
     }
     this.build_from_contents()
   }
@@ -405,6 +474,7 @@ class JSNotebook {
 
   build_html() {
     const t = this;
+    const modalId = 'jsnotebook-open-' + nextNotebookId++;
     this.container.className = 'container-fluid jsnotebook-container';
 
     const row = document.createElement('div');
@@ -484,7 +554,7 @@ class JSNotebook {
     const openBtn = document.createElement('button');
     openBtn.className = 'btn';
     openBtn.setAttribute('data-bs-toggle', 'modal');
-    openBtn.setAttribute('data-bs-target', '#open-modal');
+    openBtn.setAttribute('data-bs-target', '#' + modalId);
     // openBtn.onclick = function() {
     //   new bootstrap.Modal(t.open_modal).show();
     // }
@@ -548,9 +618,9 @@ class JSNotebook {
     // === open modal ===
     this.open_modal = document.createElement('div');
     this.open_modal.classList.add('modal', 'fade');
-    this.open_modal.id = 'open-modal';
+    this.open_modal.id = modalId;
     this.open_modal.tabIndex = -1;
-    this.open_modal.setAttribute('aria-labelledby', 'open-ModalLabel');
+    this.open_modal.setAttribute('aria-labelledby', modalId + '-label');
     this.open_modal.setAttribute('aria-hidden', 'true');
 
     // Create the modal dialog
@@ -568,7 +638,7 @@ class JSNotebook {
     // Create the modal title
     const modalTitle = document.createElement('h5');
     modalTitle.classList.add('modal-title');
-    modalTitle.id = 'open-ModalLabel';
+    modalTitle.id = modalId + '-label';
     modalTitle.textContent = 'Choose a *.jsnb file to open';
 
     // Create the close button
@@ -638,16 +708,13 @@ class JSNotebook {
   }
 
   deselect() {
-    let selected_elements = document.getElementsByClassName("selected");
-    while (selected_elements.length > 0) {
-      selected_elements = document.getElementsByClassName("selected");
-      selected_elements[0].classList.remove("selected");
-    }
+    this.container.querySelectorAll('.cell.selected').forEach(cell => cell.classList.remove('selected'));
     this.selected_cell = null;
   }
   
   select_cell(cell_id) {
     this.deselect();
+    if (!this.DOM_elements[cell_id]) return;
     this.DOM_elements[cell_id].cell.classList.add('selected');
     this.selected_cell = cell_id;
   }
@@ -787,6 +854,7 @@ class JSNotebook {
   }
 
   insert_cell(cell_id, content) {
+    const selected = this.contents[this.selected_cell];
     this.contents = insert(this.contents, cell_id, content);
     let cell_DOM = this.generate_cell_DOM(cell_id, content);
     this.DOM_elements = insert(this.DOM_elements, cell_id, cell_DOM);
@@ -798,12 +866,15 @@ class JSNotebook {
     // load cell content
     this.write_cell_code(cell_id);
     this.write_cell_output(cell_id);
+    if (selected) this.selected_cell = this.contents.indexOf(selected);
   }
 
   delete_cell(cell_id) {
+    if (!this.contents[cell_id]) return;
+    if (this.curr === this.contents[cell_id]) this.stop();
     this.contents = remove(this.contents, cell_id);
-    this.DOM_elements[this.selected_cell].cell.remove();
-    this.DOM_elements[this.selected_cell].add_bar.remove();
+    this.DOM_elements[cell_id].cell.remove();
+    this.DOM_elements[cell_id].add_bar.remove();
     this.DOM_elements = remove(this.DOM_elements, cell_id);
     this.codeMirrors = remove(this.codeMirrors, cell_id);
     this.renumber_id_notes();
@@ -811,23 +882,15 @@ class JSNotebook {
   }
 
   insert_blank_above_selected() {
-    if (this.get_num_cells() == 0) {
-      this.insert_blank_cell(1);
-      this.select_cell(1);
-    } else {
-      this.insert_blank_cell(this.selected_cell);
-      this.select_cell(this.selected_cell + 1)
-    }
+    const id = this.selected_cell || 1;
+    this.insert_blank_cell(id);
+    this.select_cell(id);
   }
 
   insert_blank_below_selected() {
-    if (this.get_num_cells() == 0) {
-      this.insert_blank_cell(1);
-      this.select_cell(1);
-    } else {
-      this.insert_blank_cell(this.selected_cell + 1);
-      this.select_cell(this.selected_cell)
-    }
+    const id = this.selected_cell ? this.selected_cell + 1 : this.get_num_cells() + 1;
+    this.insert_blank_cell(id);
+    this.select_cell(id);
   }
 
   delete_selected() {
@@ -853,10 +916,10 @@ class JSNotebook {
   write_cell_output(cell_id) {
     const t = this;
     this.DOM_elements[cell_id].verbose.style.color = this.contents[cell_id].state == 'error' ? 'red' : 'black';
-    this.DOM_elements[cell_id].verbose.innerHTML = this.contents[cell_id].output_content.replaceAll('\n','<br>').replace('\t','&emsp;').replaceAll(' ','&nbsp;');
-    this.DOM_elements[cell_id].code_tag.innerHTML = '[' + (this.contents[cell_id].state == 'queued' ? '*' : this.contents[cell_id].state == 'clear' ? ' ' : this.contents[cell_id].tag) + ']:';
+    this.DOM_elements[cell_id].verbose.textContent = this.contents[cell_id].output_content;
+    this.DOM_elements[cell_id].code_tag.textContent = '[' + (this.contents[cell_id].state == 'queued' ? '*' : this.contents[cell_id].state == 'clear' ? ' ' : this.contents[cell_id].tag) + ']:';
 
-    this.DOM_elements[cell_id].output_tag.innerHTML = '[' + {
+    this.DOM_elements[cell_id].output_tag.textContent = '[' + {
       'normal': t.contents[cell_id].tag,
       'error':'?',
       'calc':'*',
@@ -875,6 +938,7 @@ class JSNotebook {
 
 
   build_from_contents() {
+    this.stop();
     let old_contents = this.contents;
     while (this.cell_list.hasChildNodes()) {
       this.cell_list.removeChild(this.cell_list.lastChild);
@@ -888,6 +952,8 @@ class JSNotebook {
       this.execution_num = Math.max(this.execution_num, Number(old_contents[cell_id].tag));
       this.insert_cell(cell_id, old_contents[cell_id]);
     }
+    if (!this.get_num_cells()) this.insert_blank_cell(1);
+    this.select_cell(1);
   }
 
   download() {
@@ -915,13 +981,19 @@ class JSNotebook {
   }
 
   load() {
+    if (!this.file) return false;
     let fr = new FileReader();
     const t = this;
     fr.onload = function(e) {
-      t.deselect();
-      t.contents = JSON.parse(e.target.result);
-      t.build_from_contents();
+      try {
+        const contents = parseContents(e.target.result);
+        t.stop();
+        t.contents = contents;
+        t.build_from_contents();
+        t.save();
+      } catch (error) { window.alert('Unable to open notebook: ' + error.message); }
     }
+    fr.onerror = function() { window.alert('Unable to read notebook file.'); };
     fr.readAsText(this.file);
   }
 
@@ -935,7 +1007,9 @@ class JSNotebook {
   }
 
   save() {
-    localStorage.setItem(window.location.href + '--contents', this.get_string_contents());
+    try {
+      localStorage.setItem(window.location.href + '--contents', this.get_string_contents());
+    } catch (error) { console.warn('Unable to save notebook.', error); }
   }
 
   offer_selected() {

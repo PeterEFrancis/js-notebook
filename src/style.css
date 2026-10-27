@@ -4,6 +4,9 @@
 	  width: 100%;
 	  font-family: monospace;
 	  margin-top: 4px;
+	  white-space: pre-wrap;
+	  overflow-wrap: anywhere;
+	  tab-size: 2;
 	}
 
 	.CodeMirror {
@@ -52,7 +55,6 @@
 	  /* white-space: nowrap;
 	  overflow: scroll; */
 	  word-break: break-all;
-	  overflow: wrap;
 	}
 
 	.hidden {

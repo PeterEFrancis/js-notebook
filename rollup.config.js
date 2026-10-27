@@ -31,11 +31,15 @@ export default async () => {
     {
       context: 'window',
       input: 'src/index.js',
-      output: {
+      output: [{
         file: 'dist/js-notebook.min.js',
         format: 'umd',
         name: 'JSNotebook',
-      },
+      }, {
+        file: 'dist/js-notebook.cjs',
+        format: 'umd',
+        name: 'JSNotebook',
+      }],
       plugins: [
         ...sharedPlugins,
         terser(),
